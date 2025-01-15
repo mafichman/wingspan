@@ -1,0 +1,446 @@
+---
+title: "Routledge Data"
+author: "Your Name Here"
+date: "2024-10-08"
+output: html_document
+---
+
+
+```{r setup, message = FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+# ---- Load Packages ----
+#list of packages
+
+
+library(tidyverse)
+library(data.table)
+library(sf)
+library(viridis)
+library(viridisLite)
+#library(translateR)
+library(kableExtra)
+library(leaflet)
+library(leaflet.extras)
+library(lubridate)
+library(mapview)
+library(spdep)
+library(FNN)
+library(corrr)
+library(pscl)
+library(caret)
+
+library(pscl)
+library(plotROC)
+library(pROC)
+
+# ---- Load MUSA 5080 functions -----
+
+# Import MUSA 5080 functions
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+
+# ---- Load Graphic Palettes ----
+
+# Load a ggplot theme and a color palette
+
+plotTheme <- theme(
+  plot.title =element_text(size=12),
+  plot.subtitle = element_text(size=8),
+  plot.caption = element_text(size = 6),
+  axis.text.x = element_text(size = 10, angle = 45, hjust = 1),
+  axis.text.y = element_text(size = 10),
+  axis.title.y = element_text(size = 10),
+  # Set the entire chart region to blank
+  panel.background=element_blank(),
+  plot.background=element_blank(),
+  #panel.border=element_rect(colour="#F0F0F0"),
+  # Format the grid
+  panel.grid.major=element_line(colour="#D0D0D0",size=.75),
+  axis.ticks=element_blank())
+
+mapTheme <- theme(plot.title =element_text(size=12),
+                  plot.subtitle = element_text(size=8),
+                  plot.caption = element_text(size = 6),
+                  axis.line=element_blank(),
+                  axis.text.x=element_blank(),
+                  axis.text.y=element_blank(),
+                  axis.ticks=element_blank(),
+                  axis.title.x=element_blank(),
+                  axis.title.y=element_blank(),
+                  panel.background=element_blank(),
+                  panel.border=element_blank(),
+                  panel.grid.major=element_line(colour = 'transparent'),
+                  panel.grid.minor=element_blank(),
+                  legend.direction = "vertical", 
+                  legend.position = "right",
+                  plot.margin = margin(1, 1, 1, 1, 'cm'),
+                  legend.key.height = unit(1, "cm"), legend.key.width = unit(0.2, "cm"))
+
+palette <- c("#10142A", "#47E9B9", "#F55D60", "#71EA48", "#C148EA", "#EAC148")
+viridisPalette <- c("#440154", "#73D055", "#F55D60", "#238A8D", "#FDE725")
+CityPalette <- c("#A230C2", "#3AEAB8", "#F9C700", "#0069FC", 
+                 "#EF3340", "#bdbdbd", "#bcbddc", "#10142A") # Berlin, NYC, Tokyo, Stockholm, Montreal, Sydney
+
+```
+
+```{r load_data, message=FALSE, warning=FALSE, results = 'hide'}
+
+# Read in d1_aggregates from elsewhere
+d1_aggregates <- st_read("~/GitHub/CFP/unified__city_data/district_aggregates/d1_aggregates_11_16_22.geojson") %>%
+  st_as_sf(crs = 4326)
+
+# Load in target city d2_aggregates... do a quick text parsing to remove unwanted text in d2_name
+
+d2_aggregates <- st_read("~/GitHub/CFP/city_data_engineer/copenhagen_data_aggregation/output/Copenhagen_d2_aggregates.geojson") %>%
+  st_as_sf(crs = 4326) %>%
+  mutate(d2_name = str_replace(d2_name, "District - ", ""))
+
+# Load the d2_aggregates from elsewhere
+
+# REad in all the individual cities and bind together - go sf to data frame to sf if geojson has non 4326 EPSG
+# Add any missing column names (e.g. Rotterdam)
+
+d2_aggregates_all <- st_read("~/GitHub/CFP/city_data_engineer/berlin_data_aggregation/output/Berlin_d2_aggregates.geojson") %>%
+  st_as_sf(crs = 4326) %>%
+  rbind(., st_read("~/GitHub/CFP/city_data_engineer/montreal_data_aggregation/output/Montreal_d2_aggregates.geojson") %>%
+  st_as_sf(crs = 4326)) %>%
+  rbind(., st_read("~/GitHub/CFP/city_data_engineer/newyork_data_aggregation/output/NewYork_d2_aggregates.geojson") %>%
+  st_as_sf(crs = 4326)) %>%
+  rbind(., st_read("~/GitHub/CFP/city_data_engineer/sydney_data_aggregation/output/Sydney_d2_aggregates.geojson") %>%
+  st_as_sf(crs = 4326)) %>%
+  rbind(., st_read("~/GitHub/CFP/city_data_engineer/tokyo_data_aggregation/output/Tokyo_d2_aggregates.geojson") %>%
+  st_as_sf(crs = 4326)) %>%
+  rbind(., st_read("~/GitHub/CFP/city_data_engineer/stockholm_data_aggregation/output/Stockholm_d2_aggregates.geojson") %>%
+  as.data.frame() %>%
+    st_as_sf(crs = 3006) %>%
+    st_transform(4326)) %>%
+  rbind(., st_read("~/GitHub/CFP/city_data_engineer/rotterdam_data_aggregation/output/Rotterdam_d2_aggregates.geojson") %>%
+  as.data.frame() %>%
+    mutate(pop_men_t1 = NA, pop_women_t1 = NA, pop_men_t2 = NA, pop_women_t2 = NA) %>%
+    st_as_sf(crs = 3035) %>%
+    st_transform(crs = 4326))
+
+
+# Read in venues
+main_venue_data <- read.csv("~/GitHub/CFP/city_data_engineer/data_venues/output/main_venue_data_2024.csv") %>%
+  mutate(city = ifelse(city == "Solna", "Stockholm", city))
+
+# Read in EPSG information
+
+source("~/GitHub/CFP/unified__city_data/epsg_list.R")
+
+
+```
+
+```{r japanese_english, message = FALSE, warning = FALSE}
+# Load a list of special wards, do a quick join to assign english names to the d1
+
+# Perhaps this should get put in the district_aggregation code
+
+# list of the GEOID for the 23 central wards of Tokyo that are included in the analysis.
+special_wards <- c("13101",
+                   "13102",
+                   "13103",
+                   "13104",
+                   "13105",
+                   "13106",
+                   "13107",
+                   "13108",
+                   "13109",
+                   "13110",
+                   "13111",
+                   "13112",
+                   "13113",
+                   "13114",
+                   "13115",
+                   "13116",
+                   "13117",
+                   "13118",
+                   "13119",
+                   "13120",
+                   "13121",
+                   "13122",
+                   "13123")
+
+
+d1_aggregates <- left_join(d1_aggregates %>%
+                    mutate(d1_name_en = ifelse(city_en != "Tokyo", as.character(d1_name), NA),
+                           d1_id = as.character(d1_id)), 
+                           as.data.frame(cbind(c("Chiyoda", 
+                                    "Chuo",
+                                    "Minato",
+                                    "Shinjuku",
+                                    "Bunkyo",
+                                    "Taito",
+                                    "Sumida",
+                                    "Koto",
+                                    "Shinagawa",
+                                    "Meguro",
+                                    "Ota",
+                                    "Setagaya",
+                                    "Shibuya",
+                                    "Nakano",
+                                    "Suginami",
+                                    "Toshima",
+                                    "Kita",
+                                    "Arakawa",
+                                    "Itabashi",
+                                    "Nerima",
+                                    "Adachi",
+                                    "Katsu-Shika",
+                                    "Edo Gawa"),
+                                  special_wards)),
+                  by = c("d1_id" = "special_wards")) %>%
+                    mutate(d1_name_en = if_else(is.na(d1_name_en) == TRUE, as.character(V1), 
+                                                d1_name_en))%>%
+                    select(-V1)
+
+```
+
+```{r remove_towns, message = FALSE, warning = FALSE}
+# Remove former arrondissements from d1 aggregates that are now towns since 2006 reorganization
+# EXCEPT Mont Royal
+remove_arrondissements <- c("Baie-d'Urfé",
+                           "Beaconsfield",
+                           "Senneville",
+                           "Kirkland",
+                           "Montréal-Est",
+                           "Sainte-Anne-de-Bellevue",
+                           "Dorval",
+                           "Pointe-Claire")
+
+```
+
+
+TO DO -
+
+Create normalized measures of transit density, pop density, and rents for relevant d1 and d2. Figure out what's wrong with rent data in Berlin and Tokyo
+
+Berlin + Tokyo + Stockholm + Montreal - d1
+New York + Copenhagen + Rotterdam + Sydney - d2
+
+Venue density as a function of different stuff
+
+How is area venue density predicted by transit density and population density (controlling for city)?
+
+This explains roughly 53% of the variance in district venue density. It's not highly predictive without more information.
+
+```{r}
+aggregate_model_data <- d1_aggregates %>%
+    filter(city_en %in% c("Tokyo", "Berlin", "Montreal", "Stockholm")) %>%
+    filter(! d1_name %in% remove_arrondissements) %>%
+    mutate(venue_dens = venue_count / area_km2,
+           venue_dens = ifelse(venue_dens == 0, 0, venue_dens),
+           city  = case_when(city_en == "Berlin" ~ "1. BERLIN, 2017",
+                             city_en == "Tokyo" ~ "3. TOKYO, 2019",
+                             city_en == "Stockholm" ~ "4. STOCKHOLM, 2021",
+                             city_en == "Montreal" ~ "5. MONTREAL, 2022")) %>%
+    select(city, venue_dens, transit_stations_per_km2, pop_per_km2_t2, rent_t2, venue_count, area_km2) %>%
+    rbind(., d2_aggregates_all %>%
+              filter(city_en %in% c("Sydney", "New York", "Rotterdam")) %>%
+              mutate(venue_dens = venue_count / area_km2,
+                     venue_dens = ifelse(venue_dens == 0, 0, venue_dens),
+                     city  = case_when(city_en == "New York" ~ "2. NEW YORK, 2018",
+                                       city_en == "Sydney" ~ "6. SYDNEY, 2023",
+                                       city_en == "Rotterdam" ~ "7. ROTTERDAM, , 2024")) %>%
+              select(city, venue_dens, transit_stations_per_km2, pop_per_km2_t2, rent_t2, venue_count, area_km2)) %>%
+    rbind(., d2_aggregates %>%
+              mutate(venue_dens = venue_count / area_km2,
+                     venue_dens = ifelse(venue_dens == 0, 0, venue_dens),
+                     city  = "8. COPENHAGEN, 2024") %>%
+              select(city, venue_dens, transit_stations_per_km2, pop_per_km2_t2, rent_t2, venue_count, area_km2)) %>%
+  group_by(city) %>%
+  mutate(rent_t2_scaled = scale(as.numeric(rent_t2)),
+         transit_stations_scaled = scale(as.numeric(transit_stations_per_km2)),
+         pop_per_km_scaled = scale(as.numeric(pop_per_km2_t2)),
+         venue_dens_scaled = scale(as.numeric(venue_dens)))
+
+  venue_dens_model <- lm(data = aggregate_model_data, log(venue_dens) ~ transit_stations_scaled + 
+                           city + pop_per_km_scaled) 
+  
+  summary(venue_dens_model)
+  
+  aggregate_model_data %>%
+    ungroup()%>%
+    as.data.frame() %>%
+    mutate(estimated_dens = predict(venue_dens_model, aggregate_model_data)) %>%
+    ggplot()+
+    geom_abline(intercept = 0, slope = 1)+
+    geom_point(aes(x = venue_dens, y = exp(estimated_dens))) +
+    theme_bw()
+  
+  
+  aggregate_model_data %>%
+    ungroup()%>%
+    as.data.frame() %>%
+    mutate(estimated_dens = exp(predict(venue_dens_model, aggregate_model_data)),
+           est_venues = estimated_dens * area_km2) %>%
+    summarize(MAE_dens = mean(abs(estimated_dens - venue_dens), na.rm = TRUE),
+              MAPE_dens = mean(abs(estimated_dens - venue_dens) / venue_dens, na.rm = TRUE),
+              MAE_venues = mean(abs(est_venues - venue_count), na.rm = TRUE))
+
+```
+
+Programming models
+
+Experimentation - 1 = 3 or 4
+Community Focus - 1 = 3 or 4
+
+```{r}
+
+main_venue_data_modeling <- main_venue_data %>%
+  mutate(experimentation_binomial = ifelse(experimentation %in% c(3, 4), 1, 0)) %>%
+  mutate(community_binomial = ifelse(community_focus %in% c(3,4), 1, 0)) %>%
+  mutate(years_operating = as.numeric(years_operating)) %>%
+  mutate(years_operating = case_when(years_operating == 1 ~ "1. 0-3",
+                                            years_operating == 2 ~ "2. 4-10",
+                                            years_operating == 3 ~ "3. 11-20",
+                                            years_operating == 4 ~ "4. 20+")) %>%
+  mutate(size = as.numeric(size),
+         size = ifelse(size == 5, 4, size)) %>%
+         mutate(size = case_when(size == 1 ~ "1. < 100",
+                                 size == 2 ~ "2. 101-500",
+                                 size == 3 ~ "3. 501-1000",
+                                 size == 4 ~ "4. 1001+")) %>%
+  filter(is.na(x) == FALSE) %>%
+  st_as_sf(coords = c("x", "y"), crs = 4326) %>%
+  st_join(., aggregate_model_data)
+
+model_no_BERTONY <- model_no_BERTO %>%
+  filter(! city.x %in% c("Berlin", "Tokyo", "New York"))
+
+test <- glm(experimentation_binomial ~ city.x + 
+              pop_per_km_scaled + transit_stations_scaled + rent_t2_scaled +
+              venueType_club + venueType_gallery + 
+              venueType_restaurant + venueType_disco + 
+              venueType_musicBar + venueType_warehouse + venueType_theater + venueType_openAir, 
+              family="binomial"(link="logit"), 
+            data = model_no_BERTONY)
+
+summary(test)
+
+pR2(test)
+
+```
+
+```{r}
+testProbs <- data.frame(Outcome = as.factor(model_no_BERTONY$experimentation_binomial),
+                        Probs = predict(test, model_no_BERTONY, type="response"))
+
+ggplot(testProbs, aes(x = Probs, fill = as.factor(Outcome))) + 
+  geom_density() +
+  facet_grid(Outcome ~ .) +
+  labs(x = "Experimental 3-4", y = "Density of probabilities",
+       title = "Distribution of predicted probabilities by observed outcome") +
+  theme(strip.text.x = element_text(size = 18),
+        legend.position = "none")
+
+```
+
+```{r thresholds}
+testProbs <- 
+  testProbs %>%
+  mutate(predOutcome  = as.factor(ifelse(testProbs$Probs > 0.4 , 1, 0)))
+
+caret::confusionMatrix(testProbs$predOutcome, testProbs$Outcome, 
+                       positive = "1")
+
+auc(testProbs$Outcome, testProbs$Probs)
+
+```
+
+```{r}
+ggplot(testProbs, aes(d = as.numeric(Outcome), m = Probs)) +
+  geom_roc(n.cuts = 50, labels = FALSE, colour = "#FE9900") +
+  style_roc(theme = theme_grey) +
+  geom_abline(slope = 1, intercept = 0, 
+              size = 1.5, color = 'grey') +
+  labs(title = "ROC Curve - Experimental Model")
+
+```
+
+Community model
+
+This model is really good but perhaps overfit somewhere... is it the NYC data?
+
+OK we don't have this measure for NYC or Berlin.
+
+```{r}
+
+model_no_BERTONY <- model_no_BERTO %>%
+  filter(! city.x %in% c("Berlin", "Tokyo", "New York"))
+
+test2 <- glm(community_binomial ~ city.x + 
+              pop_per_km_scaled + transit_stations_scaled + rent_t2_scaled +
+              venueType_club + venueType_gallery + venueType_openAir + 
+               venueType_restaurant + venueType_disco +
+              venueType_musicBar + venueType_warehouse + venueType_theater + 
+               venue_dens_scaled, 
+              family="binomial"(link="logit"), 
+            data = model_no_BERTONY)
+
+summary(test2)
+
+pR2(test2)
+
+```
+
+```{r}
+testProbs2 <- data.frame(Outcome = as.factor(model_no_BERTONY$community_binomial),
+                        Probs = predict(test2, model_no_BERTONY, type="response"))
+
+ggplot(testProbs2, aes(x = Probs, fill = as.factor(Outcome))) + 
+  geom_density() +
+  facet_grid(Outcome ~ .) +
+  labs(x = "Community 3-4", y = "Density of probabilities",
+       title = "Distribution of predicted probabilities by observed outcome") +
+  theme(strip.text.x = element_text(size = 18),
+        legend.position = "none")
+
+```
+
+```{r thresholds}
+testProbs2 <- 
+  testProbs2 %>%
+  mutate(predOutcome  = as.factor(ifelse(testProbs2$Probs > 0.52 , 1, 0)))
+
+caret::confusionMatrix(testProbs2$predOutcome, testProbs2$Outcome, 
+                       positive = "1")
+
+auc(testProbs2$Outcome, testProbs2$Probs)
+
+```
+
+```{r}
+ggplot(testProbs2, aes(d = as.numeric(Outcome), m = Probs)) +
+  geom_roc(n.cuts = 50, labels = FALSE, colour = "#FE9900") +
+  style_roc(theme = theme_grey) +
+  geom_abline(slope = 1, intercept = 0, 
+              size = 1.5, color = 'grey') +
+  labs(title = "ROC Curve - Experimental Model")
+
+```
+
+### Exploring correlations
+
+```{r}
+
+aggregate_model_data %>% 
+  as.data.frame() %>% 
+  select(venue_dens_scaled, transit_stations_scaled,
+         transit_stations_per_km2, 
+         venue_dens, pop_per_km2_t2, pop_per_km_scaled) %>% 
+  correlate()
+
+```
+
+```{r}
+main_venue_data_modeling %>%
+  as.data.frame() %>%
+  mutate(experimentation_binomial = ifelse(experimentation %in% c(3, 4), 1, 0)) %>%
+  mutate(community_binomial = ifelse(community_focus %in% c(3,4), 1, 0)) %>%
+  group_by(experimentation_binomial) %>%
+  summarize(mean(rent_t2_scaled, na.rm = TRUE),
+            mean(venue_dens_scaled, na.rm = TRUE),
+            mean(pop_per_km_scaled, na.rm = TRUE))
+
+```
